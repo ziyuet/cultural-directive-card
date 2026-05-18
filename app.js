@@ -27,6 +27,8 @@ const sampleDirective = {
   "空间构图": "中景视角，人物和圆桌形成稳定三角构图；背景保留门框、窗户、柜子等家庭空间线索。"
 };
 
+const AI_TRANSLATE_ENDPOINT = "https://ai-assistant-proxy.ziyuet97.workers.dev/";
+
 const state = {
   directive: normalizeDirective(sampleDirective),
   modifications: [],
@@ -780,26 +782,74 @@ async function confirmAndTranslate() {
   render();
 
   try {
-    const response = await fetch("/api/cpe-translate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(finalPayload())
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    state.translationResult = await response.json();
-    state.lastMessage = "已生成";
-    toast("已接收模块2格式结果");
+    state.translationResult = await requestAiTranslation(finalPayload());
+    state.lastMessage = "AI已生成";
+    toast("AI已生成图像提示词");
   } catch (error) {
     state.translationResult = buildLocalTranslation(finalPayload());
     state.lastMessage = "静态模式已生成";
-    toast("未连接模块2接口，已使用浏览器本地生成");
+    toast(`AI接口不可用，已使用浏览器本地生成：${error.message}`, true);
   } finally {
     state.isSubmitting = false;
     render();
+  }
+}
+
+async function requestAiTranslation(payload) {
+  const response = await fetch(AI_TRANSLATE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      directive: payload,
+      task: "cpe_translate"
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+  }
+
+  return normalizeTranslationResponse(data);
+}
+
+function normalizeTranslationResponse(data) {
+  if (data && typeof data === "object" && (data.forward_prompt || data.negative_prompt || data.generation_params)) {
+    return {
+      forward_prompt: String(data.forward_prompt || ""),
+      negative_prompt: String(data.negative_prompt || ""),
+      generation_params: data.generation_params || {}
+    };
+  }
+
+  if (data && typeof data.answer === "string") {
+    const parsed = parseJsonFromText(data.answer);
+    if (parsed) return normalizeTranslationResponse(parsed);
+
+    return {
+      forward_prompt: data.answer,
+      negative_prompt: "",
+      generation_params: {
+        translator: "cloudflare worker answer"
+      }
+    };
+  }
+
+  throw new Error("AI接口返回格式不符合前端契约");
+}
+
+function parseJsonFromText(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start === -1 || end === -1 || end <= start) return null;
+    try {
+      return JSON.parse(text.slice(start, end + 1));
+    } catch {
+      return null;
+    }
   }
 }
 

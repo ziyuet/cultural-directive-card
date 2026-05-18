@@ -15,6 +15,14 @@ DEPLOY_GITHUB_PAGES.md
 
 `server.py`、`package.json` 可以不上传；如果上传也不会影响 GitHub Pages，但 Python 服务端不会被执行。
 
+如果启用 Cloudflare Worker AI 生成，需要同时把仓库上级目录中的 `workers.js` 部署到 Cloudflare Worker。前端的 `app.js` 已配置为优先调用 Worker，失败时回退到浏览器本地生成。
+
+当前 Worker 地址配置在 `app.js`：
+
+```text
+https://ai-assistant-proxy.ziyuet97.workers.dev/
+```
+
 ## 网页端部署步骤
 
 1. 登录 GitHub。
