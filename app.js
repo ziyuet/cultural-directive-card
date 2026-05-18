@@ -29,7 +29,7 @@ const sampleDirective = {
 
 const AI_TRANSLATE_ENDPOINT = "https://ai-assistant-proxy.ziyuet97.workers.dev/";
 const SOCRATIC_OPENING_QUESTION =
-  "请回忆一次你亲身经历的端午节，哪一个具体时刻让你至今难忘？简单告诉我当时发生了什么，你正在做什么。";
+  "你想与我共创以什么为主题的文化活动或者节日海报？";
 
 const state = {
   directive: normalizeDirective(sampleDirective),
