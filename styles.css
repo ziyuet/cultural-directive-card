@@ -106,6 +106,96 @@ button {
   grid-template-columns: minmax(0, 1fr) 380px;
 }
 
+.workflow {
+  display: grid;
+  gap: 18px;
+  padding: 24px 0 4px;
+}
+
+.workflow-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 0 rgba(28, 32, 30, 0.03);
+  padding: 18px;
+}
+
+.workflow-note {
+  background: var(--accent-soft);
+  border: 1px solid rgba(31, 122, 101, 0.18);
+  border-radius: var(--radius);
+  color: var(--accent-dark);
+  font-size: 13px;
+  margin-top: 12px;
+  padding: 10px 12px;
+}
+
+.workflow-json {
+  max-height: 260px;
+}
+
+.chat-log {
+  display: grid;
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.chat-message {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+}
+
+.chat-assistant {
+  background: var(--surface-soft);
+}
+
+.chat-user {
+  background: var(--accent-soft);
+  border-color: rgba(31, 122, 101, 0.18);
+}
+
+.chat-role {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat-content {
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.chat-input-row {
+  align-items: stretch;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin-top: 12px;
+}
+
+.chat-input {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--ink);
+  line-height: 1.55;
+  outline: none;
+  padding: 10px 12px;
+  resize: vertical;
+  width: 100%;
+}
+
+.chat-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(31, 122, 101, 0.14);
+}
+
 .editor {
   min-width: 0;
 }
@@ -624,6 +714,10 @@ button:disabled {
   }
 
   .anchor-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-input-row {
     grid-template-columns: 1fr;
   }
 

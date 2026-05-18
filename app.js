@@ -28,11 +28,23 @@ const sampleDirective = {
 };
 
 const AI_TRANSLATE_ENDPOINT = "https://ai-assistant-proxy.ziyuet97.workers.dev/";
+const SOCRATIC_OPENING_QUESTION =
+  "请回忆一次你亲身经历的端午节，哪一个具体时刻让你至今难忘？简单告诉我当时发生了什么，你正在做什么。";
 
 const state = {
   directive: normalizeDirective(sampleDirective),
   modifications: [],
   isSubmitting: false,
+  isSocraticSubmitting: false,
+  isTranslatingDirective: false,
+  socraticInput: "",
+  socraticMessages: [
+    {
+      role: "assistant",
+      content: SOCRATIC_OPENING_QUESTION
+    }
+  ],
+  socraticDirective: null,
   translationResult: null,
   importOpen: false,
   lastMessage: "本地草稿"
@@ -258,15 +270,43 @@ function finalPayload() {
   };
 }
 
+function toTranslatorDirective(payload) {
+  const directive = normalizeDirective(payload);
+  const atmosphere = directive["情感与氛围"] || {};
+  const modifications = payload["用户修改标记"] || payload.user_modifications || [];
+
+  return {
+    "叙事核心句": directive["叙事核心"] || "",
+    "核心记忆锚点": directive["核心记忆锚点"] || [],
+    "感知锚定": directive["感知锚定"] || {},
+    "视觉锚点列表": (directive["视觉锚点列表"] || []).map((anchor) => ({
+      "对象": anchor["对象名称"] || "",
+      "包含描述": anchor["包含描述"] || "",
+      "空间关系": anchor["空间关系"] || "",
+      "文化标签": anchor["文化标签"] || []
+    })),
+    "情感调性": normalizeStringArray(atmosphere["情感关键词"]).join("、"),
+    "视觉情感锚定": atmosphere["视觉锚定描述"] || "",
+    "禁忌与衰减规则": directive["禁忌与衰减规则"] || { "绝对禁忌": [], "衰减规则": [] },
+    "上下文关系": directive["上下文关系"] || "",
+    "空间构图": directive["空间构图"] || "",
+    "用户修改标记": modifications,
+    user_modifications: modifications
+  };
+}
+
 function render() {
   const app = document.getElementById("app");
   app.innerHTML = `
     <header class="app-header">
       <div class="header-inner">
         <div class="title-block">
-          <h1>文化指令确认卡</h1>
+          <h1>文化图像工作流</h1>
           <div class="meta-line">
-            <span class="status-pill ready">离线可编辑</span>
+            <span class="status-pill ready">一站式交互</span>
+            <span class="status-pill">阶段一：苏格拉底启发</span>
+            <span class="status-pill">阶段二：文化翻译</span>
+            <span class="status-pill">阶段三：用户确认</span>
             <span class="status-pill" id="modCountPill">${state.modifications.length} 项用户修改</span>
             <span class="status-pill">${escapeHtml(state.lastMessage)}</span>
           </div>
@@ -279,6 +319,7 @@ function render() {
       </div>
     </header>
     <main class="shell">
+      ${renderWorkflowIntro()}
       <div class="workspace">
         <div class="editor">
           ${renderNarrative()}
@@ -298,6 +339,70 @@ function render() {
     </main>
     ${state.importOpen ? renderImportModal() : ""}
     <input class="hidden-input" id="fileInput" type="file" accept="application/json,.json" />
+  `;
+}
+
+function renderWorkflowIntro() {
+  return `
+    <section class="workflow">
+      ${renderSocraticPanel()}
+      ${renderTranslationPanel()}
+    </section>
+  `;
+}
+
+function renderSocraticPanel() {
+  return `
+    <section class="workflow-panel">
+      <div class="section-head">
+        <div>
+          <h2>阶段一：苏格拉底启发</h2>
+          <div class="section-count">${state.socraticDirective ? "已生成结构化文化叙事 JSON" : "按固定阶段回答 AI 追问"}</div>
+        </div>
+        <button class="secondary-btn" data-action="reset-socratic">${buttonIcon("reset")}重开启发</button>
+      </div>
+      <div class="chat-log">
+        ${state.socraticMessages.map(renderChatMessage).join("")}
+      </div>
+      <div class="chat-input-row">
+        <textarea id="socraticInput" class="chat-input" rows="3" placeholder="在这里回答当前问题">${escapeHtml(state.socraticInput)}</textarea>
+        <button class="primary-btn" data-action="send-socratic" ${state.isSocraticSubmitting ? "disabled" : ""}>${buttonIcon("send")}${state.isSocraticSubmitting ? "发送中" : "发送"}</button>
+      </div>
+      ${
+        state.socraticDirective
+          ? `<div class="workflow-note">阶段一最终 JSON 已载入下方确认卡，可继续阶段二翻译或手动调整。</div>`
+          : ""
+      }
+    </section>
+  `;
+}
+
+function renderChatMessage(message) {
+  return `
+    <div class="chat-message ${message.role === "user" ? "chat-user" : "chat-assistant"}">
+      <div class="chat-role">${message.role === "user" ? "你" : "AI"}</div>
+      <div class="chat-content">${escapeHtml(message.content)}</div>
+    </div>
+  `;
+}
+
+function renderTranslationPanel() {
+  const canTranslate = Boolean(state.socraticDirective);
+  return `
+    <section class="workflow-panel">
+      <div class="section-head">
+        <div>
+          <h2>阶段二：文化翻译</h2>
+          <div class="section-count">${state.translationResult ? "已生成图像提示词" : "将阶段一 JSON 翻译为绘图 prompt"}</div>
+        </div>
+        <button class="primary-btn" data-action="run-stage-two" ${!canTranslate || state.isTranslatingDirective ? "disabled" : ""}>${buttonIcon("send")}${state.isTranslatingDirective ? "翻译中" : "运行文化翻译"}</button>
+      </div>
+      ${
+        canTranslate
+          ? `<pre class="json-preview workflow-json">${escapeHtml(JSON.stringify(state.socraticDirective, null, 2))}</pre>`
+          : `<div class="empty-state">完成阶段一后，这里会出现结构化文化叙事 JSON。</div>`
+      }
+    </section>
   `;
 }
 
@@ -795,12 +900,114 @@ async function confirmAndTranslate() {
   }
 }
 
+async function sendSocraticMessage() {
+  const input = document.getElementById("socraticInput");
+  const content = String(input ? input.value : state.socraticInput).trim();
+  if (!content || state.isSocraticSubmitting) return;
+
+  state.socraticInput = "";
+  state.isSocraticSubmitting = true;
+  state.socraticMessages = [...state.socraticMessages, { role: "user", content }];
+  state.lastMessage = "阶段一对话中";
+  render();
+
+  try {
+    const answer = await requestSocraticAnswer(state.socraticMessages);
+    state.socraticMessages = [...state.socraticMessages, { role: "assistant", content: answer }];
+    const finalDirective = extractFinalDirective(answer);
+
+    if (finalDirective) {
+      state.socraticDirective = finalDirective;
+      state.directive = normalizeDirective(finalDirective);
+      state.modifications = [];
+      state.translationResult = null;
+      state.lastMessage = "阶段一完成";
+      toast("阶段一最终 JSON 已载入确认卡");
+    } else {
+      state.lastMessage = "等待下一轮回答";
+    }
+  } catch (error) {
+    state.lastMessage = "阶段一接口不可用";
+    toast(`苏格拉底启发请求失败：${error.message}`, true);
+  } finally {
+    state.isSocraticSubmitting = false;
+    render();
+  }
+}
+
+async function requestSocraticAnswer(messages) {
+  const response = await fetch(AI_TRANSLATE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      task: "socratic",
+      messages
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+  }
+
+  if (!data.answer) {
+    throw new Error("AI接口未返回追问内容");
+  }
+  return String(data.answer);
+}
+
+async function runStageTwoTranslation() {
+  if (!state.socraticDirective || state.isTranslatingDirective) return;
+
+  state.isTranslatingDirective = true;
+  state.lastMessage = "阶段二翻译中";
+  render();
+
+  try {
+    state.translationResult = await requestAiTranslation({
+      ...state.socraticDirective,
+      "用户修改标记": state.modifications,
+      user_modifications: state.modifications
+    });
+    state.lastMessage = "阶段二完成";
+    toast("阶段二文化翻译已完成");
+  } catch (error) {
+    state.translationResult = buildLocalTranslation(finalPayload());
+    state.lastMessage = "阶段二静态回退";
+    toast(`文化翻译接口不可用，已使用本地生成：${error.message}`, true);
+  } finally {
+    state.isTranslatingDirective = false;
+    render();
+  }
+}
+
+function extractFinalDirective(text) {
+  if (!text.includes("最终输出") && !text.includes("叙事核心句")) {
+    return null;
+  }
+  const parsed = parseJsonFromText(text);
+  if (!parsed || typeof parsed !== "object") return null;
+  if (!parsed["叙事核心句"] && !parsed["叙事核心"]) return null;
+  return parsed;
+}
+
+function resetSocraticFlow() {
+  const confirmed = window.confirm("重启阶段一对话？当前苏格拉底聊天记录会被清空。");
+  if (!confirmed) return;
+  state.socraticInput = "";
+  state.socraticMessages = [{ role: "assistant", content: SOCRATIC_OPENING_QUESTION }];
+  state.socraticDirective = null;
+  state.translationResult = null;
+  state.lastMessage = "阶段一已重启";
+  render();
+}
+
 async function requestAiTranslation(payload) {
   const response = await fetch(AI_TRANSLATE_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      directive: payload,
+      directive: toTranslatorDirective(payload),
       task: "cpe_translate"
     })
   });
@@ -957,6 +1164,7 @@ function applyImport(rawText) {
       : [];
 
   state.directive = normalizeDirective(parsed);
+  state.socraticDirective = toTranslatorDirective(parsed);
   state.modifications = modifications;
   state.translationResult = null;
   state.importOpen = false;
@@ -970,6 +1178,7 @@ function resetDialogue() {
   if (!confirmed) return;
   state.directive = normalizeDirective(sampleDirective);
   state.modifications = [];
+  state.socraticDirective = null;
   state.translationResult = null;
   state.lastMessage = "本地草稿";
   render();
@@ -987,6 +1196,10 @@ function toast(message, isError = false) {
 document.addEventListener("input", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
+  if (target.id === "socraticInput") {
+    state.socraticInput = target.value;
+    return;
+  }
   if (target.dataset.action === "update-field") {
     updateField(parsePathToken(target.dataset.path), target.value);
     refreshLivePanels();
@@ -1000,6 +1213,10 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     addTag(parsePathToken(target.dataset.path), target.value);
   }
+  if (target.id === "socraticInput" && event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    sendSocraticMessage();
+  }
 });
 
 document.addEventListener("click", (event) => {
@@ -1009,6 +1226,9 @@ document.addEventListener("click", (event) => {
 
   if (action === "add-anchor") addAnchor();
   if (action === "remove-anchor") removeAnchor(Number(button.dataset.index));
+  if (action === "send-socratic") sendSocraticMessage();
+  if (action === "reset-socratic") resetSocraticFlow();
+  if (action === "run-stage-two") runStageTwoTranslation();
   if (action === "add-sensory") addSensoryAnchor();
   if (action === "remove-sensory") removeSensoryAnchor(button.dataset.key);
   if (action === "add-taboo") addRule("绝对禁忌");
