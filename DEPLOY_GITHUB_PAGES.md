@@ -15,7 +15,7 @@ DEPLOY_GITHUB_PAGES.md
 
 `server.py`、`package.json` 可以不上传；如果上传也不会影响 GitHub Pages，但 Python 服务端不会被执行。
 
-如果启用 Cloudflare Worker AI 生成，需要同时把仓库上级目录中的 `workers.js` 部署到 Cloudflare Worker。前端的 `app.js` 已配置为通过 Worker 完成阶段一苏格拉底启发和阶段二文化翻译；最终确认卡生成失败时会回退到浏览器本地生成。
+如果启用 Cloudflare Worker AI 生成，需要同时把仓库上级目录中的 `workers.js` 部署到 Cloudflare Worker。前端的 `app.js` 已配置为通过 Worker 完成阶段一苏格拉底启发、阶段二文化翻译、阶段四对抗解码；最终确认卡生成失败时会回退到浏览器本地生成。
 
 当前 Worker 使用 DeepSeek OpenAI-compatible API：
 

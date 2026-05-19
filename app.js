@@ -46,6 +46,18 @@ const state = {
   ],
   socraticDirective: null,
   translationResult: null,
+  isVisionCritiquing: false,
+  stageFourImage: null,
+  stageFourImageEvidence: "",
+  stageFourCritiqueReport: "",
+  stageFourCritiqueHistory: [],
+  isTraceGenerating: false,
+  traceImage: null,
+  traceAnnotations: [],
+  traceSummary: "",
+  selectedTraceId: "",
+  traceJsonInput: "",
+  traceRaw: null,
   importOpen: false,
   lastMessage: "本地草稿"
 };
@@ -270,6 +282,25 @@ function finalPayload() {
   };
 }
 
+function clearStageFourState() {
+  state.isVisionCritiquing = false;
+  state.stageFourImage = null;
+  state.stageFourImageEvidence = "";
+  state.stageFourCritiqueReport = "";
+  state.stageFourCritiqueHistory = [];
+  clearTraceState();
+}
+
+function clearTraceState() {
+  state.isTraceGenerating = false;
+  state.traceImage = null;
+  state.traceAnnotations = [];
+  state.traceSummary = "";
+  state.selectedTraceId = "";
+  state.traceJsonInput = "";
+  state.traceRaw = null;
+}
+
 function toTranslatorDirective(payload) {
   const directive = normalizeDirective(payload);
   const atmosphere = directive["情感与氛围"] || {};
@@ -295,6 +326,204 @@ function toTranslatorDirective(payload) {
   };
 }
 
+function buildGenerationPackage() {
+  const cpe = toTranslatorDirective(finalPayload());
+  const prompts = state.translationResult || buildLocalTranslation(finalPayload());
+  return {
+    mode: "cpe_to_image_generation",
+    provider_targets: ["Stable Diffusion", "DALL-E 3", "Flux"],
+    cpe_quadrants: {
+      visual_anchors: cpe["视觉锚点列表"],
+      taboo_rules: cpe["禁忌与衰减规则"],
+      atmosphere_calibration: {
+        emotion_tone: cpe["情感调性"],
+        visual_emotion_anchor: cpe["视觉情感锚定"],
+        recommended_lora: prompts.generation_params?.recommended_lora || prompts.generation_params?.style || ""
+      },
+      narrative_core: cpe["叙事核心句"]
+    },
+    prompts,
+    control_policy: {
+      user_prompt_hidden: true,
+      assemble_from_cpe_only: true,
+      user_modifications_must_be_preserved: cpe["用户修改标记"] || []
+    }
+  };
+}
+
+function buildImageGenerationChatPrompt() {
+  const generationPackage = buildGenerationPackage();
+  return [
+    "请根据下面的“图像生成交接包”生成一张图像。",
+    "",
+    "执行规则：",
+    "1. 直接生成图片，不要把它改写成新的主题，也不要添加用户没有提供的文化元素。",
+    "2. 必须保留 forward_prompt 中的视觉锚点、空间关系、光线、视角和构图。",
+    "3. 必须避开 negative_prompt 中的所有禁忌；如果当前平台不支持 negative prompt，也要在生成时主动排除这些元素。",
+    "4. 生成后，请附上一段“生成图像证据”，用中文列出实际画面中出现的主要物件、人物动作、光线色彩、空间布局，以及是否出现任何可能触犯禁忌的元素。我会把这段证据粘贴回网页继续做文化批判。",
+    "",
+    "图像生成交接包：",
+    JSON.stringify(generationPackage, null, 2)
+  ].join("\n");
+}
+
+function buildUploadedImageEvidence(image) {
+  if (!image) return "";
+  return [
+    "已上传外部生成图像，可用于 Gemma 看图批判。",
+    "",
+    "图像文件信息：",
+    `- 文件名：${image.name || "未命名"}`,
+    `- 类型：${image.type || "未知"}`,
+    `- 大小：${image.size ? `${Math.round(image.size / 1024)} KB` : "未知"}`,
+    "",
+    "人工观察补充：",
+    "（请在这里补充你看到的主要物件、人物动作、光线色彩、空间布局，以及是否出现禁忌元素。）"
+  ].join("\n");
+}
+
+function buildAdversarialDecodeChatPrompt() {
+  const evidence = state.stageFourImageEvidence.trim() || "（尚未提供生成图像证据。若缺少证据，请先要求用户补充图像描述，不要凭空判断图像内容。）";
+  return [
+    "你是一个文化人类学批评者，任务是基于原始 CPE、图像生成交接包和生成图像证据，对生成结果进行对抗性文化解码。如果我同时上传了一张生成图像，请优先直接观察图像；如果没有图像，只能根据文字证据判断。",
+    "",
+    "审查原则：",
+    "1. 只根据 CPE 与生成图像证据判断，不要臆造图像里没有被描述的内容。",
+    "2. 刻板印象扫描：检查是否出现与主题不匹配、过度符号化或陈词滥调的文化符号。",
+    "3. 叙事一致性检查：检查图像是否偏离用户的核心叙事、关系、私密/公共氛围、空间构图。",
+    "4. 禁忌触犯检查：逐条核对绝对禁忌与衰减规则，判断是否出现、是否过强、是否需要移除或弱化。",
+    "5. 用户是意义的最终仲裁者，所以批评必须具体、可执行，避免替用户重新定义主题。",
+    "",
+    "请只输出下面结构的 JSON，不要添加解释文字：",
+    JSON.stringify({
+      "刻板印象扫描": "是否出现陈词滥调或错误文化符号，给出依据",
+      "叙事一致性检查": "图像是否忠实于核心叙事和关系氛围",
+      "禁忌触犯检查": "逐条说明绝对禁忌或衰减规则是否被触犯",
+      "具体批评": ["2-3条具体问题"],
+      "修正建议": ["2-3条可执行修正建议"],
+      "建议用户操作": "接受批评并重新生成 / 忽视批评保留当前版本 / 部分接受并修改CPE",
+      "再生成提示词修正": {
+        "forward_prompt_additions": "需要加强的正向描述",
+        "negative_prompt_additions": "需要补充或加重的负向约束"
+      }
+    }, null, 2),
+    "",
+    "原始 CPE：",
+    JSON.stringify(toTranslatorDirective(finalPayload()), null, 2),
+    "",
+    "图像生成交接包：",
+    JSON.stringify(buildGenerationPackage(), null, 2),
+    "",
+    "生成图像证据：",
+    evidence
+  ].join("\n");
+}
+
+function buildRegenerationChatPrompt() {
+  const report = state.stageFourCritiqueReport.trim();
+  return [
+    "请依据下面的文化批判报告重新生成图片。",
+    "",
+    "执行规则：",
+    "1. 原始 CPE 仍然是最高优先级，不要改变用户的文化主题、叙事核心、视觉锚点和禁忌规则。",
+    "2. 只接受文化批判报告中与 CPE 一致的修正建议。",
+    "3. 重新生成时加强报告指出的缺失视觉锚点，移除或弱化报告指出的禁忌/刻板元素。",
+    "4. 生成后仍然附上“生成图像证据”，方便继续审查。",
+    "",
+    "原始图像生成指令：",
+    buildImageGenerationChatPrompt(),
+    "",
+    "文化批判报告：",
+    report || "（尚未粘贴文化批判报告。）"
+  ].join("\n");
+}
+
+function buildTraceContext() {
+  return {
+    stage1_socratic_dialogue: state.socraticMessages,
+    stage1_structured_cpe: state.socraticDirective,
+    stage2_translation_result: state.translationResult,
+    stage3_current_cpe: toTranslatorDirective(finalPayload()),
+    stage3_user_modifications: state.modifications,
+    stage4_generation_package: buildGenerationPackage(),
+    stage4_image_evidence: state.stageFourImageEvidence,
+    stage4_current_critique_report: state.stageFourCritiqueReport,
+    stage4_critique_history: state.stageFourCritiqueHistory
+  };
+}
+
+function buildCritiqueArchiveText() {
+  const records = [...state.stageFourCritiqueHistory];
+  const current = state.stageFourCritiqueReport.trim();
+  if (current && !records.some((item) => item.report === current)) {
+    records.push({
+      round: records.length + 1,
+      source: "current_textarea",
+      saved_at: new Date().toISOString(),
+      report: current
+    });
+  }
+
+  if (!records.length) return "";
+  return records
+    .map((item) => [
+      `第${item.round || "?"}轮批判（${item.source || "unknown"}，${item.saved_at || "no timestamp"}）：`,
+      item.report || ""
+    ].join("\n"))
+    .join("\n\n");
+}
+
+function saveStageFourCritiqueRecord(source = "manual") {
+  const report = state.stageFourCritiqueReport.trim();
+  if (!report) return;
+  if (state.stageFourCritiqueHistory.some((item) => item.report === report)) return;
+  state.stageFourCritiqueHistory = [
+    ...state.stageFourCritiqueHistory,
+    {
+      round: state.stageFourCritiqueHistory.length + 1,
+      source,
+      saved_at: new Date().toISOString(),
+      report
+    }
+  ];
+}
+
+function buildCulturalTraceChatPrompt() {
+  return [
+    "请完成“文化溯源与话语权可视化”任务。我会同时上传最终图片；如果没有图片，请先要求我上传，不要凭空标注。",
+    "",
+    "目标：让用户看见最终画面里哪些关键元素来自用户表达，哪些来自用户修改，哪些是AI为画面完整性自动补全。",
+    "",
+    "标注类型：",
+    "1. user_anchor：来自用户 CPE、阶段一对话、核心记忆锚点、感知锚定、视觉锚点或空间构图的元素。",
+    "2. user_modified_anchor：来自阶段三用户修改标记，或阶段四批判/修正回路后被用户采纳、强化、保留的元素。",
+    "3. model_completion：最终图片中可见，但前面阶段没有明确要求，只是模型自动补全的背景、器物、装饰、人物、光影或场景填充。",
+    "",
+    "输出严格 JSON，不要 Markdown。bbox 使用百分比坐标，x/y 为左上角，范围 0-100。",
+    JSON.stringify({
+      summary: "一句话说明最终图片中用户表达、用户改动与AI补全的关系",
+      annotations: [
+        {
+          id: "a1",
+          type: "user_anchor | user_modified_anchor | model_completion",
+          label: "图中元素短名称",
+          bbox: { x: 10, y: 20, width: 30, height: 25 },
+          source_path: "来源字段路径或 AI completion",
+          source_quote: "用户原话、CPE片段或空字符串",
+          trace_text: "点击标注时显示的文化溯源码",
+          reasoning: "判定依据",
+          confidence: "low | medium | high"
+        }
+      ]
+    }, null, 2),
+    "",
+    "完整阶段上下文：",
+    JSON.stringify(buildTraceContext(), null, 2),
+    "",
+    "注意：如果最终图片不是阶段四最初上传的图片，请以我当前上传给你的最终图片为准。"
+  ].join("\n");
+}
+
 function render() {
   const app = document.getElementById("app");
   app.innerHTML = `
@@ -307,6 +536,8 @@ function render() {
             <span class="status-pill">阶段一：苏格拉底启发</span>
             <span class="status-pill">阶段二：文化翻译</span>
             <span class="status-pill">阶段三：用户确认</span>
+            <span class="status-pill">阶段四：对抗解码</span>
+            <span class="status-pill">阶段五：文化溯源</span>
             <span class="status-pill" id="modCountPill">${state.modifications.length} 项用户修改</span>
             <span class="status-pill">${escapeHtml(state.lastMessage)}</span>
           </div>
@@ -319,34 +550,21 @@ function render() {
       </div>
     </header>
     <main class="shell">
-      ${renderWorkflowIntro()}
-      <div class="workspace">
-        <div class="editor">
-          ${renderNarrative()}
-          ${renderMemoryContext()}
-          ${renderAnchors()}
-          ${renderAtmosphere()}
-          ${renderRules()}
-          ${renderComposition()}
-          <div class="action-zone">
-            <button class="primary-btn" data-action="confirm-translate" ${state.isSubmitting ? "disabled" : ""}>${buttonIcon("send")}${state.isSubmitting ? "生成中" : "确认并生成"}</button>
-            <button class="secondary-btn" data-action="export-json">${buttonIcon("download")}导出JSON</button>
-            <button class="ghost-btn" data-action="reset-dialogue">${buttonIcon("reset")}重新对话</button>
-          </div>
-        </div>
-        ${renderSidePanel()}
-      </div>
+      ${renderWorkflow()}
     </main>
     ${state.importOpen ? renderImportModal() : ""}
     <input class="hidden-input" id="fileInput" type="file" accept="application/json,.json" />
   `;
 }
 
-function renderWorkflowIntro() {
+function renderWorkflow() {
   return `
     <section class="workflow">
       ${renderSocraticPanel()}
       ${renderTranslationPanel()}
+      ${renderStageThreePanel()}
+      ${renderStageFourPanel()}
+      ${renderTracePanel()}
     </section>
   `;
 }
@@ -404,6 +622,313 @@ function renderTranslationPanel() {
       }
     </section>
   `;
+}
+
+function renderStageThreePanel() {
+  return `
+    <section class="workflow-panel">
+      <div class="section-head">
+        <div>
+          <h2>阶段三：用户确认</h2>
+          <div class="section-count">审核 CPE 块，保留用户修改标记，用户是意义的最终仲裁者</div>
+        </div>
+        <div class="toolbar">
+          <button class="secondary-btn" data-action="export-json">${buttonIcon("download")}导出JSON</button>
+          <button class="primary-btn" data-action="confirm-translate" ${state.isSubmitting ? "disabled" : ""}>${buttonIcon("send")}${state.isSubmitting ? "生成中" : "确认并生成"}</button>
+        </div>
+      </div>
+      <div class="stage-three-layout">
+        <div class="editor">
+          ${renderNarrative()}
+          ${renderMemoryContext()}
+          ${renderAnchors()}
+          ${renderAtmosphere()}
+          ${renderRules()}
+          ${renderComposition()}
+          <div class="action-zone">
+            <button class="primary-btn" data-action="confirm-translate" ${state.isSubmitting ? "disabled" : ""}>${buttonIcon("send")}${state.isSubmitting ? "生成中" : "确认并生成"}</button>
+            <button class="secondary-btn" data-action="export-json">${buttonIcon("download")}导出JSON</button>
+            <button class="ghost-btn" data-action="reset-dialogue">${buttonIcon("reset")}重新对话</button>
+          </div>
+        </div>
+        ${renderSidePanel()}
+      </div>
+    </section>
+  `;
+}
+
+function renderStageFourPanel() {
+  const hasPrompt = Boolean(state.translationResult?.forward_prompt);
+  const hasEvidence = Boolean(state.stageFourImageEvidence.trim());
+  const hasReport = Boolean(state.stageFourCritiqueReport.trim());
+  const hasUploadedImage = Boolean(state.stageFourImage?.image_data_url);
+  return `
+    <section class="workflow-panel">
+      <div class="section-head">
+        <div>
+          <h2>阶段四：多模态生成与对抗解码代理</h2>
+          <div class="section-count">${hasReport ? "已粘贴文化批判报告" : "CPE → 图像生成交接包 → 生成图像证据 → 对抗解码"}</div>
+        </div>
+        <button class="primary-btn" data-action="copy-image-prompt" ${!hasPrompt ? "disabled" : ""}>${buttonIcon("copy")}复制生图指令</button>
+      </div>
+      ${hasPrompt ? `
+        <div class="stage-four-flow">
+          ${renderStageFourStep(
+            1,
+            "当前文化指令 CPE",
+            "这是文化意义、视觉锚点、禁忌规则和构图的原始依据。",
+            `
+              <pre class="json-preview workflow-json">${escapeHtml(JSON.stringify(toTranslatorDirective(finalPayload()), null, 2))}</pre>
+            `,
+            `<button class="secondary-btn" data-action="copy-cpe">${buttonIcon("copy")}复制CPE</button>`
+          )}
+          ${renderStageFourStep(
+            2,
+            "图像生成交接包",
+            "由 CPE 和阶段二翻译结果自动组装，用来交给图像生成模型。",
+            renderGenerationPackagePreview(),
+            `<button class="secondary-btn" data-action="copy-generation-package">${buttonIcon("copy")}复制交接包</button>`
+          )}
+          ${renderStageFourStep(
+            3,
+            "生成图像证据",
+            "复制生图指令到 ChatGPT 或其他文生图工具生成图片，再把图片上传回来供 Gemma 批判。",
+            `
+              <div class="field">
+                <span class="field-label">复制给 GPT 的图像生成指令</span>
+                <textarea class="chat-input prompt-textarea" rows="12" readonly>${escapeHtml(buildImageGenerationChatPrompt())}</textarea>
+              </div>
+              <div class="action-row">
+                <button class="primary-btn" data-action="copy-image-prompt">${buttonIcon("copy")}一键复制生图指令</button>
+              </div>
+              <div class="field">
+                <span class="field-label">上传外部生成图像</span>
+                <input id="stageFourImageFile" class="file-input" type="file" accept="image/png,image/jpeg,image/webp">
+              </div>
+              ${renderStageFourImagePreview()}
+              <div class="field">
+                <span class="field-label">生成图像证据</span>
+                <textarea id="stageFourImageEvidence" class="chat-input" rows="7" placeholder="把 GPT 或其他工具生成图片后给出的画面说明、图片链接，或你自己观察到的画面内容粘贴在这里。若已上传图片，Gemma 会直接看图；这里可补充你观察到的物件、人物动作、光线色彩、空间布局和禁忌元素。">${escapeHtml(state.stageFourImageEvidence)}</textarea>
+              </div>
+            `
+          )}
+          ${renderStageFourStep(
+            4,
+            "运行对抗解码",
+            hasUploadedImage ? "可直接用 Gemma 读取上传图像并输出文化批判；也可复制指令到 GPT 网页端作为备用。" : hasEvidence ? "复制下面的批判指令到 GPT，让它依据 CPE 和图像证据进行文化审查。" : "先上传生成图片或填写生成图像证据，再运行对抗解码。",
+            `
+              <div class="field">
+                <span class="field-label">复制给 GPT 的对抗解码指令</span>
+                <textarea id="stageFourDecodePrompt" class="chat-input prompt-textarea" rows="14" readonly>${escapeHtml(buildAdversarialDecodeChatPrompt())}</textarea>
+              </div>
+              <div class="action-row">
+                <button class="primary-btn" data-action="critique-uploaded-image" ${!hasUploadedImage || state.isVisionCritiquing ? "disabled" : ""}>${buttonIcon("send")}${state.isVisionCritiquing ? "Gemma批判中" : "使用Gemma看图并批判"}</button>
+                <button class="secondary-btn" data-action="run-stage-four" data-stage-four-decode-copy ${!hasEvidence ? "disabled" : ""}>${buttonIcon("copy")}一键复制对抗解码指令</button>
+              </div>
+              <div class="field">
+                <span class="field-label">文化批判报告</span>
+                <textarea id="stageFourCritiqueReport" class="chat-input" rows="8" placeholder="Gemma 看图批判的结果会自动写入这里；你也可以把 GPT 的文化批判报告手动粘贴在这里。粘贴后可以选择接受批评并复制重新生成指令、忽视批评，或回到阶段三手动修改 CPE。">${escapeHtml(state.stageFourCritiqueReport)}</textarea>
+              </div>
+              <div class="action-row">
+                <button class="secondary-btn" data-action="save-stage-four-critique" data-stage-four-report-action ${!hasReport ? "disabled" : ""}>保存本轮批判</button>
+                <button class="secondary-btn" data-action="accept-stage-four" data-stage-four-report-action ${!hasReport ? "disabled" : ""}>接受批评并重新生成</button>
+                <button class="secondary-btn" data-action="ignore-stage-four" data-stage-four-report-action ${!hasReport ? "disabled" : ""}>忽视批评，保留当前版本</button>
+                <button class="ghost-btn" data-action="partial-stage-four" data-stage-four-report-action ${!hasReport ? "disabled" : ""}>部分接受，手动修改CPE</button>
+              </div>
+            `
+          )}
+        </div>
+      ` : '<div class="empty-state">完成阶段二或阶段三生成后，这里会出现图像生成交接包和可复制的 GPT 指令。</div>'}
+    </section>
+  `;
+}
+
+function renderStageFourStep(number, title, note, body, actions = "") {
+  return `
+    <article class="stage-four-step">
+      <div class="stage-four-number">${number}</div>
+      <div class="stage-four-body">
+        <div class="stage-four-head">
+          <div>
+            <h3>${escapeHtml(title)}</h3>
+            <p>${escapeHtml(note)}</p>
+          </div>
+          ${actions ? `<div class="stage-four-actions">${actions}</div>` : ""}
+        </div>
+        ${body}
+      </div>
+    </article>
+  `;
+}
+
+function renderGenerationPackagePreview() {
+  return `
+    <div class="result-block no-margin">
+      <div class="result-label">图像生成交接包</div>
+      <pre class="json-preview workflow-json">${escapeHtml(JSON.stringify(buildGenerationPackage(), null, 2))}</pre>
+    </div>
+  `;
+}
+
+function renderStageFourImagePreview() {
+  if (!state.stageFourImage?.image_data_url) {
+    return "";
+  }
+
+  return `
+    <div class="generated-image-panel">
+      <div class="result-label">已上传的生成图像</div>
+      <img class="generated-image" src="${escapeAttr(state.stageFourImage.image_data_url)}" alt="Uploaded generated image">
+      <div class="generated-image-meta">
+        ${escapeHtml(state.stageFourImage.name || "未命名")} ·
+        ${escapeHtml(state.stageFourImage.type || "未知类型")} ·
+        ${escapeHtml(state.stageFourImage.size ? `${Math.round(state.stageFourImage.size / 1024)} KB` : "未知大小")}
+      </div>
+    </div>
+  `;
+}
+
+function renderTracePanel() {
+  const traceImage = getTraceImage();
+  const hasImage = Boolean(traceImage?.image_data_url);
+  const hasAnnotations = state.traceAnnotations.length > 0;
+  const userCount = state.traceAnnotations.filter((item) => item.type === "user_anchor").length;
+  const modifiedCount = state.traceAnnotations.filter((item) => item.type === "user_modified_anchor").length;
+  const modelCount = state.traceAnnotations.filter((item) => item.type === "model_completion").length;
+
+  return `
+    <section class="workflow-panel">
+      <div class="section-head">
+        <div>
+          <h2>阶段五：文化溯源与话语权可视化</h2>
+          <div class="section-count">${hasAnnotations ? `${userCount} 个用户锚定，${modifiedCount} 个用户改动，${modelCount} 个模型补全` : "默认使用阶段四图片，也可上传最终图片覆盖默认图"}</div>
+        </div>
+        <div class="toolbar">
+          <button class="secondary-btn" data-action="copy-trace-prompt">${buttonIcon("copy")}复制溯源提示词</button>
+          <button class="primary-btn" data-action="generate-trace" ${!hasImage || state.isTraceGenerating ? "disabled" : ""}>${buttonIcon("send")}${state.isTraceGenerating ? "溯源中" : "生成文化溯源标注"}</button>
+        </div>
+      </div>
+      <div class="field">
+        <span class="field-label">上传最终图片（可选）</span>
+        <input id="stageFiveImageFile" class="file-input" type="file" accept="image/png,image/jpeg,image/webp">
+      </div>
+      <div class="field">
+        <span class="field-label">复制到 GPT 的文化溯源提示词</span>
+        <textarea class="chat-input prompt-textarea" rows="10" readonly>${escapeHtml(buildCulturalTraceChatPrompt())}</textarea>
+      </div>
+      <div class="field">
+        <span class="field-label">粘贴外部 GPT 返回的溯源 JSON</span>
+        <textarea id="traceJsonInput" class="chat-input prompt-textarea" rows="9" placeholder="把外部 GPT 生成的 JSON 粘贴到这里。系统会解析 annotations / trace_annotations，并自动在最终图片上绘制标注。">${escapeHtml(state.traceJsonInput)}</textarea>
+      </div>
+      <div class="action-row">
+        <button class="secondary-btn" data-action="apply-trace-json" ${!state.traceJsonInput.trim() ? "disabled" : ""}>应用外部JSON标注</button>
+      </div>
+      ${
+        hasImage
+          ? `
+            <div class="trace-layout">
+              <div class="trace-viewer">
+                <div class="trace-legend">
+                  <span><i class="trace-swatch user-anchor"></i>用户锚定元素</span>
+                  <span><i class="trace-swatch user-modified-anchor"></i>用户改动锚定</span>
+                  <span><i class="trace-swatch model-completion"></i>模型补全元素</span>
+                </div>
+                <div class="trace-canvas">
+                  <img class="trace-image" src="${escapeAttr(traceImage.image_data_url)}" alt="Final image for cultural trace">
+                  ${renderTraceBoxes()}
+                </div>
+              </div>
+              <div class="trace-side">
+                ${renderTraceDetail()}
+              </div>
+            </div>
+            ${state.traceSummary ? `<div class="workflow-note">${escapeHtml(state.traceSummary)}</div>` : ""}
+          `
+          : `<div class="empty-state">阶段五默认使用阶段四上传的图片。若阶段四还没有图片，请先上传最终图片。</div>`
+      }
+    </section>
+  `;
+}
+
+function getTraceImage() {
+  return state.traceImage?.image_data_url ? state.traceImage : state.stageFourImage;
+}
+
+function renderTraceBoxes() {
+  if (!state.traceAnnotations.length) {
+    return '<div class="trace-empty-overlay">尚未生成溯源标注</div>';
+  }
+
+  return state.traceAnnotations
+    .map((item) => {
+      const box = normalizeTraceBox(item.bbox);
+      const selected = String(item.id) === String(state.selectedTraceId);
+      const className = `trace-box ${traceTypeClass(item.type)}${selected ? " selected" : ""}`;
+      return `
+        <button
+          class="${className}"
+          data-action="select-trace"
+          data-id="${escapeAttr(item.id)}"
+          style="left:${box.x}%;top:${box.y}%;width:${box.width}%;height:${box.height}%"
+          title="${escapeAttr(item.label || "")}"
+        >
+          <span>${escapeHtml(item.label || "标注")}</span>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+function renderTraceDetail() {
+  if (!state.traceAnnotations.length) {
+    return `
+      <div class="trace-detail empty">
+        <h3>文化溯源码</h3>
+        <p>生成标注后，点击图像中的框查看元素来源。</p>
+      </div>
+    `;
+  }
+
+  const selected = state.traceAnnotations.find((item) => String(item.id) === String(state.selectedTraceId)) || state.traceAnnotations[0];
+  const typeText = traceTypeText(selected.type);
+  const source = selected.source_quote || selected.source_path || selected.reasoning || "";
+
+  return `
+    <div class="trace-detail">
+      <div class="trace-type ${traceTypeClass(selected.type)}">${typeText}</div>
+      <h3>${escapeHtml(selected.label || "未命名元素")}</h3>
+      <p>${escapeHtml(selected.trace_text || selected.reasoning || "暂无溯源说明。")}</p>
+      ${source ? `<div class="trace-source"><span>来源</span>${escapeHtml(source)}</div>` : ""}
+      ${selected.confidence ? `<div class="trace-confidence">识别置信度：${escapeHtml(selected.confidence)}</div>` : ""}
+    </div>
+  `;
+}
+
+function traceTypeClass(type) {
+  if (type === "model_completion") return "model-completion";
+  if (type === "user_modified_anchor") return "user-modified-anchor";
+  return "user-anchor";
+}
+
+function traceTypeText(type) {
+  if (type === "model_completion") return "模型补全元素";
+  if (type === "user_modified_anchor") return "用户改动锚定";
+  return "用户锚定元素";
+}
+
+function normalizeTraceBox(bbox) {
+  const source = bbox && typeof bbox === "object" ? bbox : {};
+  const x = clampPercent(source.x ?? source.left ?? 8, 0, 98);
+  const y = clampPercent(source.y ?? source.top ?? 8, 0, 98);
+  const width = clampPercent(source.width ?? source.w ?? 24, 2, 100 - x);
+  const height = clampPercent(source.height ?? source.h ?? 18, 2, 100 - y);
+  return { x, y, width, height };
+}
+
+function clampPercent(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.min(max, Math.max(min, number));
 }
 
 function renderNarrative() {
@@ -888,10 +1413,12 @@ async function confirmAndTranslate() {
 
   try {
     state.translationResult = await requestAiTranslation(finalPayload());
+    clearStageFourState();
     state.lastMessage = "AI已生成";
     toast("AI已生成图像提示词");
   } catch (error) {
     state.translationResult = buildLocalTranslation(finalPayload());
+    clearStageFourState();
     state.lastMessage = "静态模式已生成";
     toast(`AI接口不可用，已使用浏览器本地生成：${error.message}`, true);
   } finally {
@@ -921,6 +1448,7 @@ async function sendSocraticMessage() {
       state.directive = normalizeDirective(finalDirective);
       state.modifications = [];
       state.translationResult = null;
+      clearStageFourState();
       state.lastMessage = "阶段一完成";
       toast("阶段一最终 JSON 已载入确认卡");
     } else {
@@ -969,16 +1497,308 @@ async function runStageTwoTranslation() {
       "用户修改标记": state.modifications,
       user_modifications: state.modifications
     });
+    clearStageFourState();
     state.lastMessage = "阶段二完成";
     toast("阶段二文化翻译已完成");
   } catch (error) {
     state.translationResult = buildLocalTranslation(finalPayload());
+    clearStageFourState();
     state.lastMessage = "阶段二静态回退";
     toast(`文化翻译接口不可用，已使用本地生成：${error.message}`, true);
   } finally {
     state.isTranslatingDirective = false;
     render();
   }
+}
+
+function loadStageFourImageFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith("image/")) {
+    toast("请上传图片文件", true);
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.stageFourImage = {
+      name: file.name,
+      type: file.type,
+      size: file.size,
+      image_data_url: String(reader.result || "")
+    };
+    clearTraceState();
+    if (!state.stageFourImageEvidence.trim()) {
+      state.stageFourImageEvidence = buildUploadedImageEvidence(state.stageFourImage);
+    }
+    state.lastMessage = "已上传生成图像";
+    render();
+    toast("生成图像已上传，可运行Gemma批判");
+  };
+  reader.onerror = () => {
+    toast("图片读取失败", true);
+  };
+  reader.readAsDataURL(file);
+}
+
+function loadTraceImageFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith("image/")) {
+    toast("请上传图片文件", true);
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    clearTraceState();
+    state.traceImage = {
+      name: file.name,
+      type: file.type,
+      size: file.size,
+      image_data_url: String(reader.result || "")
+    };
+    state.lastMessage = "已上传最终图片";
+    render();
+    toast("最终图片已上传，可生成文化溯源标注");
+  };
+  reader.onerror = () => {
+    toast("最终图片读取失败", true);
+  };
+  reader.readAsDataURL(file);
+}
+
+async function critiqueUploadedImage() {
+  if (!state.stageFourImage?.image_data_url || state.isVisionCritiquing) {
+    toast("请先上传外部生成图像", true);
+    return;
+  }
+
+  state.isVisionCritiquing = true;
+  state.lastMessage = "Gemma看图批判中";
+  render();
+
+  try {
+    const critique = await requestGemmaVisionCritique({
+      cpe: toTranslatorDirective(finalPayload()),
+      generation_package: buildGenerationPackage(),
+      image_data_url: state.stageFourImage.image_data_url,
+      image_evidence: state.stageFourImageEvidence || ""
+    });
+    state.stageFourCritiqueReport = JSON.stringify(critique.report || critique, null, 2);
+    saveStageFourCritiqueRecord("gemma_vision");
+    state.lastMessage = "Gemma批判完成";
+    toast("Gemma已完成看图文化批判");
+  } catch (error) {
+    state.lastMessage = "Gemma批判失败";
+    toast(`Gemma看图批判失败：${error.message}`, true);
+  } finally {
+    state.isVisionCritiquing = false;
+    render();
+  }
+}
+
+async function requestGemmaVisionCritique(payload) {
+  const response = await fetch(AI_TRANSLATE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      task: "critique_image",
+      ...payload
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+  }
+  return data;
+}
+
+async function generateCulturalTrace() {
+  const traceImage = getTraceImage();
+  if (!traceImage?.image_data_url || state.isTraceGenerating) {
+    toast("请先在阶段四或阶段五上传最终图片", true);
+    return;
+  }
+
+  saveStageFourCritiqueRecord("before_trace");
+  state.isTraceGenerating = true;
+  state.lastMessage = "文化溯源生成中";
+  render();
+
+  try {
+    const trace = await requestCulturalTrace({
+      cpe: toTranslatorDirective(finalPayload()),
+      generation_package: buildGenerationPackage(),
+      image_data_url: traceImage.image_data_url,
+      image_evidence: state.stageFourImageEvidence || "",
+      critique_report: buildCritiqueArchiveText(),
+      dialogue_evidence: buildDialogueEvidence(),
+      user_modifications: state.modifications,
+      stage_context: buildTraceContext()
+    });
+    applyTraceResult(trace);
+    state.lastMessage = "文化溯源完成";
+    toast("文化溯源标注已生成");
+  } catch (error) {
+    state.lastMessage = "文化溯源失败";
+    toast(`文化溯源失败：${error.message}`, true);
+  } finally {
+    state.isTraceGenerating = false;
+    render();
+  }
+}
+
+async function requestCulturalTrace(payload) {
+  const response = await fetch(AI_TRANSLATE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      task: "trace_image",
+      ...payload
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+  }
+  return data.trace || data;
+}
+
+function applyTraceResult(trace) {
+  const normalized = normalizeTraceResult(trace);
+  if (!normalized.annotations.length) {
+    throw new Error("溯源JSON中没有可用的 annotations");
+  }
+  state.traceAnnotations = normalized.annotations;
+  state.traceSummary = normalized.summary;
+  state.traceRaw = trace;
+  state.selectedTraceId = normalized.annotations[0]?.id || "";
+}
+
+function applyTraceJsonInput() {
+  const raw = state.traceJsonInput.trim();
+  if (!raw) {
+    toast("请先粘贴溯源JSON", true);
+    return;
+  }
+
+  const parsed = parseJsonFromText(raw);
+  if (!parsed) {
+    toast("无法解析JSON，请检查格式", true);
+    return;
+  }
+
+  try {
+    applyTraceResult(parsed.trace || parsed);
+    state.lastMessage = "已应用外部溯源JSON";
+    toast("外部JSON标注已应用到最终图片");
+    render();
+  } catch (error) {
+    toast(`外部JSON无法应用：${error.message}`, true);
+  }
+}
+
+function normalizeTraceResult(trace) {
+  const source = trace && typeof trace === "object" ? trace : {};
+  const annotations = Array.isArray(source.annotations)
+    ? source.annotations
+    : Array.isArray(source.trace_annotations)
+      ? source.trace_annotations
+      : [];
+
+  return {
+    summary: String(source.summary || source.recognition_summary || ""),
+    annotations: annotations
+      .map((item, index) => normalizeTraceAnnotation(item, index))
+      .filter((item) => item.label && item.bbox)
+      .slice(0, 12)
+  };
+}
+
+function normalizeTraceAnnotation(item, index) {
+  const source = item && typeof item === "object" ? item : {};
+  const id = String(source.id || `trace-${index + 1}`);
+  const rawType = source.type || source.category || "";
+  const type = rawType === "model_completion"
+    ? "model_completion"
+    : rawType === "user_modified_anchor"
+      ? "user_modified_anchor"
+      : "user_anchor";
+  return {
+    id,
+    type,
+    label: String(source.label || source.element || source.name || ""),
+    bbox: normalizeTraceBox(source.bbox || source.box || {}),
+    source_path: String(source.source_path || ""),
+    source_quote: String(source.source_quote || source.quote || ""),
+    trace_text: String(source.trace_text || source.trace || source.explanation || ""),
+    reasoning: String(source.reasoning || ""),
+    confidence: String(source.confidence || "")
+  };
+}
+
+function buildDialogueEvidence() {
+  return state.socraticMessages
+    .filter((message) => message.role === "user")
+    .map((message, index) => `用户回答${index + 1}：${message.content}`)
+    .join("\n\n");
+}
+
+async function runStageFourDecode() {
+  if (!state.translationResult?.forward_prompt) return;
+  if (!state.stageFourImageEvidence.trim()) {
+    toast("请先粘贴生成图像证据", true);
+    return;
+  }
+  await copyText(buildAdversarialDecodeChatPrompt(), "对抗解码指令");
+  state.lastMessage = "对抗解码指令已复制";
+  render();
+}
+
+function acceptStageFourCritique() {
+  if (!state.stageFourCritiqueReport.trim()) {
+    toast("请先粘贴文化批判报告", true);
+    return;
+  }
+  saveStageFourCritiqueRecord("accept_and_regenerate");
+  copyText(buildRegenerationChatPrompt(), "重新生成指令");
+  state.lastMessage = "重新生成指令已复制";
+  render();
+}
+
+function ignoreStageFourCritique() {
+  if (!state.stageFourCritiqueReport.trim()) {
+    toast("请先粘贴文化批判报告", true);
+    return;
+  }
+  saveStageFourCritiqueRecord("ignore_and_keep");
+  state.lastMessage = "已保留当前版本";
+  toast("已保留当前版本，不修改CPE和提示词");
+  render();
+}
+
+function partialAcceptStageFourCritique() {
+  if (!state.stageFourCritiqueReport.trim()) {
+    toast("请先粘贴文化批判报告", true);
+    return;
+  }
+  saveStageFourCritiqueRecord("partial_accept_edit_cpe");
+  state.lastMessage = "请手动修改CPE块";
+  toast("请在阶段三中修改对应象限后重新运行阶段二/四");
+  document.querySelector(".stage-three-layout")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function saveCurrentStageFourCritique() {
+  if (!state.stageFourCritiqueReport.trim()) {
+    toast("请先粘贴文化批判报告", true);
+    return;
+  }
+  const before = state.stageFourCritiqueHistory.length;
+  saveStageFourCritiqueRecord("manual_saved");
+  state.lastMessage = "已保存阶段四批判";
+  toast(state.stageFourCritiqueHistory.length > before ? "本轮批判已保存" : "这轮批判已在历史中");
+  render();
 }
 
 function extractFinalDirective(text) {
@@ -998,6 +1818,7 @@ function resetSocraticFlow() {
   state.socraticMessages = [{ role: "assistant", content: SOCRATIC_OPENING_QUESTION }];
   state.socraticDirective = null;
   state.translationResult = null;
+  clearStageFourState();
   state.lastMessage = "阶段一已重启";
   render();
 }
@@ -1167,6 +1988,7 @@ function applyImport(rawText) {
   state.socraticDirective = toTranslatorDirective(parsed);
   state.modifications = modifications;
   state.translationResult = null;
+  clearStageFourState();
   state.importOpen = false;
   state.lastMessage = "已导入";
   render();
@@ -1180,6 +2002,7 @@ function resetDialogue() {
   state.modifications = [];
   state.socraticDirective = null;
   state.translationResult = null;
+  clearStageFourState();
   state.lastMessage = "本地草稿";
   render();
 }
@@ -1198,6 +2021,35 @@ document.addEventListener("input", (event) => {
   if (!(target instanceof HTMLElement)) return;
   if (target.id === "socraticInput") {
     state.socraticInput = target.value;
+    return;
+  }
+  if (target.id === "stageFourImageEvidence") {
+    state.stageFourImageEvidence = target.value;
+    const decodePrompt = document.getElementById("stageFourDecodePrompt");
+    if (decodePrompt instanceof HTMLTextAreaElement) {
+      decodePrompt.value = buildAdversarialDecodeChatPrompt();
+    }
+    const decodeButton = document.querySelector("[data-stage-four-decode-copy]");
+    if (decodeButton instanceof HTMLButtonElement) {
+      decodeButton.disabled = !state.stageFourImageEvidence.trim();
+    }
+    return;
+  }
+  if (target.id === "stageFourCritiqueReport") {
+    state.stageFourCritiqueReport = target.value;
+    document.querySelectorAll("[data-stage-four-report-action]").forEach((node) => {
+      if (node instanceof HTMLButtonElement) {
+        node.disabled = !state.stageFourCritiqueReport.trim();
+      }
+    });
+    return;
+  }
+  if (target.id === "traceJsonInput") {
+    state.traceJsonInput = target.value;
+    const applyButton = document.querySelector('[data-action="apply-trace-json"]');
+    if (applyButton instanceof HTMLButtonElement) {
+      applyButton.disabled = !state.traceJsonInput.trim();
+    }
     return;
   }
   if (target.dataset.action === "update-field") {
@@ -1219,6 +2071,17 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+document.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) return;
+  if (target.id === "stageFourImageFile") {
+    loadStageFourImageFile(target.files?.[0]);
+  }
+  if (target.id === "stageFiveImageFile") {
+    loadTraceImageFile(target.files?.[0]);
+  }
+});
+
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-action]");
   if (!button) return;
@@ -1229,6 +2092,22 @@ document.addEventListener("click", (event) => {
   if (action === "send-socratic") sendSocraticMessage();
   if (action === "reset-socratic") resetSocraticFlow();
   if (action === "run-stage-two") runStageTwoTranslation();
+  if (action === "critique-uploaded-image") critiqueUploadedImage();
+  if (action === "generate-trace") generateCulturalTrace();
+  if (action === "apply-trace-json") applyTraceJsonInput();
+  if (action === "select-trace") {
+    state.selectedTraceId = button.dataset.id || "";
+    render();
+  }
+  if (action === "run-stage-four") runStageFourDecode();
+  if (action === "save-stage-four-critique") saveCurrentStageFourCritique();
+  if (action === "accept-stage-four") acceptStageFourCritique();
+  if (action === "ignore-stage-four") ignoreStageFourCritique();
+  if (action === "partial-stage-four") partialAcceptStageFourCritique();
+  if (action === "copy-cpe") copyText(JSON.stringify(toTranslatorDirective(finalPayload()), null, 2), "当前CPE");
+  if (action === "copy-generation-package") copyText(JSON.stringify(buildGenerationPackage(), null, 2), "图像生成交接包");
+  if (action === "copy-image-prompt") copyText(buildImageGenerationChatPrompt(), "生图指令");
+  if (action === "copy-trace-prompt") copyText(buildCulturalTraceChatPrompt(), "文化溯源提示词");
   if (action === "add-sensory") addSensoryAnchor();
   if (action === "remove-sensory") removeSensoryAnchor(button.dataset.key);
   if (action === "add-taboo") addRule("绝对禁忌");
